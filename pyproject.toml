@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "leaf-inpainting"
+version = "0.1.0"
+description = "Restoring damaged leaves in images: classical and exemplar inpainting with a leaf-shape evaluation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.24", "scipy>=1.10", "scikit-image>=0.22", "opencv-python-headless>=4.8", "pillow>=10"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+deep = ["torch", "diffusers>=0.27", "transformers", "accelerate"]
+
+[project.scripts]
+leafinpaint = "leafinpaint.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 130
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "E702", "B905"]

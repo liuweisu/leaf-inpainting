@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leaf inpainting</title>
+<style>
+  :root { --bg:#f6f7f3; --fg:#1d221b; --muted:#5f685b; --card:#fff; --line:#dce1d6; --accent:#3e7b35; --mask:#e0457b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121510; --fg:#e4eae1; --muted:#9aa594; --card:#1a1e17; --line:#2b3227; --accent:#83c374; --mask:#ff7aa6; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width:980px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:1.6rem; margin:0 0 4px; } .lead { color:var(--muted); margin:0 0 18px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px; }
+  .btn { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:8px 14px; font:inherit; cursor:pointer; }
+  .btn.ghost { background:transparent; color:var(--accent); border:1px solid var(--accent); }
+  .btn:disabled { opacity:.5; cursor:wait; }
+  input[type=file] { display:none; }
+  select { font:inherit; padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); }
+  .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:14px; }
+  figure { margin:0; } figcaption { color:var(--muted); font-size:13px; margin-top:4px; }
+  .stage { position:relative; touch-action:none; }
+  canvas { width:100%; height:auto; display:block; border-radius:8px; }
+  #mask { position:absolute; inset:0; cursor:crosshair; }
+  .muted { color:var(--muted); font-size:13px; }
+  #stats { font-variant-numeric: tabular-nums; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Leaf inpainting</h1>
+  <p class="lead">Paint damage on a leaf, then restore it. Two methods from <a href="https://github.com/liuweisu/leaf-inpainting">leaf-inpainting</a>, ported to JavaScript: a smooth diffusion fill (Laplace equation) and exemplar-based inpainting (Criminisi et al. 2004), which copies patches of real texture along strong edges first. Everything runs in your browser.</p>
+  <section class="card">
+    <div class="row">
+      <button class="btn ghost" data-sample="bites">Sample: insect bites</button>
+      <button class="btn ghost" data-sample="tear">Sample: tear</button>
+      <button class="btn ghost" data-sample="intact">Paint your own damage</button>
+      <label class="btn ghost">Upload image<input type="file" id="file" accept="image/*"></label>
+    </div>
+    <div class="row">
+      <label class="muted">Brush <input type="range" id="brush" min="3" max="24" value="10"></label>
+      <button class="btn ghost" id="clear">Clear mask</button>
+      <select id="method" aria-label="method">
+        <option value="exemplar">Exemplar (patch-based)</option>
+        <option value="diffusion">Diffusion (harmonic)</option>
+      </select>
+      <button class="btn" id="go">Inpaint</button>
+      <span id="stats" class="muted"></span>
+    </div>
+    <div class="grid">
+      <figure><div class="stage"><canvas id="img"></canvas><canvas id="mask"></canvas></div><figcaption>Draw over the region to restore (pink). Images are scaled to 256 px.</figcaption></figure>
+      <figure><canvas id="out"></canvas><figcaption id="out-cap">Result</figcaption></figure>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const SIZE = 256;
+let W = 0, H = 0, src = null, mask = null;   // src: Float32Array RGB, mask: Uint8Array
+const imgC = $("img"), maskC = $("mask"), outC = $("out");
+
+function setImage(image, maskImage) {
+  const s = Math.min(1, SIZE / Math.max(image.width, image.height));
+  W = Math.round(image.width * s); H = Math.round(image.height * s);
+  for (const c of [imgC, maskC, outC]) { c.width = W; c.height = H; }
+  const ctx = imgC.getContext("2d"); ctx.drawImage(image, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  src = new Float32Array(W * H * 3);
+  for (let i = 0; i < W * H; i++) for (let k = 0; k < 3; k++) src[3 * i + k] = d[4 * i + k];
+  mask = new Uint8Array(W * H);
+  if (maskImage) {
+    const t = document.createElement("canvas"); t.width = W; t.height = H;
+    const tc = t.getContext("2d"); tc.drawImage(maskImage, 0, 0, W, H);
+    const md = tc.getImageData(0, 0, W, H).data;
+    for (let i = 0; i < W * H; i++) mask[i] = md[4 * i] > 127 ? 1 : 0;
+  }
+  drawMask(); outC.getContext("2d").clearRect(0, 0, W, H); $("stats").textContent = ""; $("out-cap").textContent = "Result";
+}
+
+function drawMask() {
+  const ctx = maskC.getContext("2d"), im = ctx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) if (mask[i]) im.data.set([224, 69, 123, 170], 4 * i);
+  ctx.putImageData(im, 0, 0);
+}
+
+// painting
+let painting = false;
+function paint(e) {
+  const r = maskC.getBoundingClientRect();
+  const x = (e.clientX - r.left) * W / r.width, y = (e.clientY - r.top) * H / r.height, b = +$("brush").value / 2;
+  for (let yy = Math.floor(y - b); yy <= y + b; yy++) for (let xx = Math.floor(x - b); xx <= x + b; xx++)
+    if (xx >= 0 && yy >= 0 && xx < W && yy < H && (xx - x) ** 2 + (yy - y) ** 2 <= b * b) mask[yy * W + xx] = 1;
+  drawMask();
+}
+maskC.addEventListener("pointerdown", (e) => { painting = true; maskC.setPointerCapture(e.pointerId); paint(e); });
+maskC.addEventListener("pointermove", (e) => { if (painting) paint(e); });
+maskC.addEventListener("pointerup", () => painting = false);
+$("clear").onclick = () => { mask.fill(0); drawMask(); };
+
+function show(img, unknown) {
+  const ctx = outC.getContext("2d"), im = ctx.createImageData(W, H);
+  for (let i = 0; i < W * H; i++) {
+    if (unknown && unknown[i]) im.data.set([255, 255, 255, 255], 4 * i);
+    else im.data.set([img[3 * i], img[3 * i + 1], img[3 * i + 2], 255], 4 * i);
+  }
+  ctx.putImageData(im, 0, 0);
+}
+
+// ---------- diffusion: coarse-to-fine Gauss-Seidel on the Laplace equation ----------
+function diffusion(img, m, w, h) {
+  if (w > 8 && h > 8) {
+    const w2 = Math.ceil(w / 2), h2 = Math.ceil(h / 2);
+    const ci = new Float32Array(w2 * h2 * 3), cm = new Uint8Array(w2 * h2), cnt = new Float32Array(w2 * h2);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const j = (y >> 1) * w2 + (x >> 1), i = y * w + x;
+      if (!m[i]) { cnt[j]++; for (let k = 0; k < 3; k++) ci[3 * j + k] += img[3 * i + k]; }
+    }
+    for (let j = 0; j < w2 * h2; j++) { if (cnt[j]) for (let k = 0; k < 3; k++) ci[3 * j + k] /= cnt[j]; else cm[j] = 1; }
+    const coarse = diffusion(ci, cm, w2, h2);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x; if (m[i]) for (let k = 0; k < 3; k++) img[3 * i + k] = coarse[3 * ((y >> 1) * w2 + (x >> 1)) + k];
+    }
+  } else {
+    let mean = [0, 0, 0], n = 0;
+    for (let i = 0; i < w * h; i++) if (!m[i]) { n++; for (let k = 0; k < 3; k++) mean[k] += img[3 * i + k]; }
+    for (let i = 0; i < w * h; i++) if (m[i]) for (let k = 0; k < 3; k++) img[3 * i + k] = n ? mean[k] / n : 128;
+  }
+  for (let it = 0; it < 60; it++) for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x; if (!m[i]) continue;
+    for (let k = 0; k < 3; k++) {
+      let s = 0, c = 0;
+      if (x > 0) { s += img[3 * (i - 1) + k]; c++; } if (x < w - 1) { s += img[3 * (i + 1) + k]; c++; }
+      if (y > 0) { s += img[3 * (i - w) + k]; c++; } if (y < h - 1) { s += img[3 * (i + w) + k]; c++; }
+      img[3 * i + k] = s / c;
+    }
+  }
+  return img;
+}
+
+// ---------- exemplar-based (Criminisi et al. 2004) ----------
+async function exemplar(img, m0, w, h, patch = 9, search = 32) {
+  const r = patch >> 1, unknown = Uint8Array.from(m0), conf = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) conf[i] = unknown[i] ? 0 : 1;
+  // source patch centres: whole patch inside the image and outside the original mask
+  const okSrc = new Uint8Array(w * h);
+  for (let y = r; y < h - r; y++) for (let x = r; x < w - r; x++) {
+    let ok = 1;
+    for (let dy = -r; dy <= r && ok; dy++) for (let dx = -r; dx <= r; dx++) if (m0[(y + dy) * w + x + dx]) { ok = 0; break; }
+    okSrc[y * w + x] = ok;
+  }
+  const gray = (i) => (img[3 * i] + img[3 * i + 1] + img[3 * i + 2]) / 3;
+  let remaining = unknown.reduce((a, b) => a + b, 0), iter = 0;
+  while (remaining > 0) {
+    let best = -1, bestP = -1, bestC = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!unknown[i]) continue;
+      const nb = (x > 0 && !unknown[i - 1]) || (x < w - 1 && !unknown[i + 1]) || (y > 0 && !unknown[i - w]) || (y < h - 1 && !unknown[i + w]);
+      if (!nb) continue;
+      // confidence term
+      let cs = 0;
+      for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+        const yy = y + dy, xx = x + dx; if (yy >= 0 && yy < h && xx >= 0 && xx < w) cs += conf[yy * w + xx];
+      }
+      const C = cs / (patch * patch);
+      // front normal from the mask, isophote from the strongest known gradient nearby
+      const u = (xx, yy) => (xx < 0 || yy < 0 || xx >= w || yy >= h) ? 0 : unknown[yy * w + xx];
+      const nx = u(x + 1, y) - u(x - 1, y), ny = u(x, y + 1) - u(x, y - 1), nn = Math.hypot(nx, ny) || 1;
+      let iso = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx, yy = y + dy;
+        if (xx < 1 || yy < 1 || xx >= w - 1 || yy >= h - 1) continue;
+        const j = yy * w + xx;
+        if (unknown[j] || unknown[j - 1] || unknown[j + 1] || unknown[j - w] || unknown[j + w]) continue;
+        const gx = (gray(j + 1) - gray(j - 1)) / 2, gy = (gray(j + w) - gray(j - w)) / 2;
+        iso = Math.max(iso, Math.abs(-gy * nx + gx * ny) / nn);
+      }
+      const P = C * (iso / 255 + 0.001);
+      if (P > best) { best = P; bestP = i; bestC = C; }
+    }
+    if (bestP < 0) break;
+    const px = Math.min(Math.max(bestP % w, r), w - r - 1), py = Math.min(Math.max((bestP / w) | 0, r), h - r - 1);
+    let bestSsd = Infinity, sx = -1, sy = -1;
+    const scan = (y0, y1, x0, x1) => {
+      for (let cy = y0; cy <= y1; cy++) for (let cx = x0; cx <= x1; cx++) {
+        if (!okSrc[cy * w + cx]) continue;
+        let ssd = 0;
+        for (let dy = -r; dy <= r && ssd < bestSsd; dy++) for (let dx = -r; dx <= r; dx++) {
+          const t = (py + dy) * w + px + dx; if (unknown[t]) continue;
+          const s = (cy + dy) * w + cx + dx;
+          for (let k = 0; k < 3; k++) { const d = img[3 * t + k] - img[3 * s + k]; ssd += d * d; }
+        }
+        if (ssd < bestSsd) { bestSsd = ssd; sx = cx; sy = cy; }
+      }
+    };
+    scan(Math.max(r, py - search), Math.min(h - r - 1, py + search), Math.max(r, px - search), Math.min(w - r - 1, px + search));
+    if (sx < 0) scan(r, h - r - 1, r, w - r - 1);
+    if (sx < 0) break;
+    for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
+      const t = (py + dy) * w + px + dx; if (!unknown[t]) continue;
+      const s = (sy + dy) * w + sx + dx;
+      for (let k = 0; k < 3; k++) img[3 * t + k] = img[3 * s + k];
+      unknown[t] = 0; conf[t] = bestC; remaining--;
+    }
+    if (++iter % 8 === 0) { show(img, unknown); await new Promise(requestAnimationFrame); }
+  }
+  return img;
+}
+
+$("go").onclick = async () => {
+  if (!mask.some((v) => v)) { $("stats").textContent = "Paint a region first."; return; }
+  $("go").disabled = true;
+  const img = Float32Array.from(src), t0 = performance.now(), method = $("method").value;
+  const result = method === "exemplar" ? await exemplar(img, mask, W, H) : diffusion(img, Uint8Array.from(mask), W, H);
+  show(result);
+  const n = mask.reduce((a, b) => a + b, 0);
+  $("stats").textContent = `${n.toLocaleString()} pixels restored in ${((performance.now() - t0) / 1000).toFixed(2)} s`;
+  $("out-cap").textContent = `Result: ${$("method").selectedOptions[0].text}`;
+  $("go").disabled = false;
+};
+
+function loadImages(srcUrl, maskUrl) {
+  const a = new Image(); a.onload = () => {
+    if (!maskUrl) return setImage(a);
+    const b = new Image(); b.onload = () => setImage(a, b); b.src = maskUrl;
+  }; a.src = srcUrl;
+}
+document.querySelectorAll("[data-sample]").forEach((b) => b.onclick = () => {
+  const s = b.dataset.sample;
+  if (s === "intact") loadImages("samples/leaf_intact.png");
+  else loadImages(`samples/damaged_${s}.png`, `samples/mask_${s}.png`);
+});
+$("file").onchange = (e) => { const f = e.target.files[0]; if (f) loadImages(URL.createObjectURL(f)); };
+loadImages("samples/damaged_bites.png", "samples/mask_bites.png");
+</script>
+</body>
+</html>
