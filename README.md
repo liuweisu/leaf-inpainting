@@ -3,6 +3,8 @@
 [![CI](https://github.com/liuweisu/leaf-inpainting/actions/workflows/ci.yml/badge.svg)](https://github.com/liuweisu/leaf-inpainting/actions/workflows/ci.yml)
 **[Paint damage on a leaf and restore it in your browser](https://liuweisu.github.io/leaf-inpainting/)**
 
+> **About this repository.** This is a showcase of work I did during my studies at Wageningen University & Research (WUR). The original research and course code lives on WUR's internal GitLab and is not public. The code here was rebuilt quickly with help from Claude, an AI assistant, to show the methods and results; it is not the original thesis or course code.
+
 Restoring damaged leaves in images: insect bites in the margin, shot holes, tears. Before measuring leaf area or shape from a photo, the missing tissue has to be filled in, and the fill has to put the leaf edge where it really was.
 
 In my MSc thesis I used generative inpainting models for this and found that they often produce leaf shapes that look convincing and are wrong. This repository is the classical side of that work, and an evaluation that catches the problem:
